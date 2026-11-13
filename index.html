@@ -34,6 +34,7 @@
   const TAU = Math.PI * 2;
   const FONT = '"Chalkboard SE","Comic Sans MS","Trebuchet MS","Arial Rounded MT Bold",system-ui,sans-serif';
 
+
   let W = 1180, H = 820, DPR = 1;
   let state = "title";
   let time = 0, lastTs = 0;
@@ -42,11 +43,15 @@
   let zombies = [], shurikens = [], particles = [], floaters = [];
   let spawnTimer = 0, nextZid = 1, camX = 0, combo = 0;
   let playPressed = false;
-  let held = { tri: false, x: false };
+  let held = { tri: false, x: false, left: false, right: false, jump: false };
   let btnRepeat = { tri: 0, x: 0 };
-  let buttons = { tri: null, x: null, play: null };
+  let buttons = { tri: null, x: null, play: null, left: null, right: null, jump: null };
   let groundY = 600;
   let shotMode = false;
+  let levelW = 3200, platforms = [], flag = { x: 3000, y: 400 }, tower = null;
+  let pointers = new Map();
+  let jumpBuf = 0, coyote = 0, jumpPrev = false, levelLock = 0;
+  const WALK_SP = 340, JUMP_V = -920, GRAVITY = 1750;
 
   const CHEERS = ["Great job!","Super star!","Wow!","Awesome!","You did it!","Ninja power!","Amazing!","Yes!","Wow Destin!","Super ninja!","Nice!","Hooray!"];
 
@@ -156,6 +161,7 @@
     fanfare(){ [523,659,784,1046].forEach((n,i)=>this.tone(n,0.22,"triangle",0.12,i*0.1)); this.tone(1318,0.35,"sine",0.08,0.42); },
     cheer(){ this.tone(659,0.12,"triangle",0.1); this.tone(784,0.14,"triangle",0.1,0.08); this.tone(1046,0.22,"triangle",0.12,0.16); },
     emerge(){ this.noise(0.18,0.07,0,200); this.tone(140,0.16,"sine",0.05,0,80); },
+    jump(){ this.tone(420,0.12,"square",0.07,0,780); this.tone(640,0.1,"triangle",0.05,0.02,980); },
     tick(dt){
       if (!this.ctx || !this.unlocked || this.muted || state !== "play") return;
       this.acc += dt;
@@ -204,7 +210,7 @@
     n=n||28;
     const cols=["#ffe066","#ff6b6b","#4ecdc4","#74b9ff","#fd79a8","#55efc4","#fdcb6e"];
     for (let i=0;i<n;i++){
-      particles.push({x:rand(0,W),y:rand(-40,-4),vx:rand(-40,40),vy:rand(40,140),g:80,life:1.4,decay:0.35,size:rand(5,11),color:cols[rint(0,6)],rot:rand(0,TAU),rotv:rand(-10,10),shape:"rect",kind:"confetti"});
+      particles.push({x:rand(0,W),y:rand(-40,-4),vx:rand(-40,40),vy:rand(40,140),g:80,life:1.4,decay:0.35,size:rand(5,11),color:cols[rint(0,6)],rot:rand(0,TAU),rotv:rand(-10,10),shape:"rect",kind:"confetti",space:"screen"});
     }
   }
   function addFloater(str,x,y,color){ floaters.push({str,x,y,t:0,color:color||"#ffe566"}); }
@@ -214,14 +220,15 @@
     confettiRain(24); Sfx.cheer();
   }
 
+
   function makeNinja(){
-    return { x:W*0.5, y:groundY, face:1, state:"idle", anim:0, t:0, blink:0, inv:0, scarf:0, walk:0 };
+    return { x:200, y:groundY, vy:0, prevY:groundY, onGround:true, face:1, state:"idle", anim:0, t:0, blink:0, inv:0, scarf:0, walk:0 };
   }
   function spawnZombie(opts){
     opts = opts || {};
-    const side = opts.side || (chance(0.5)?-1:1);
-    const margin = Math.min(120, W*0.12);
-    const x = opts.x != null ? opts.x : (side<0 ? rand(margin, Math.max(margin+10,W*0.28)) : rand(W*0.72, W-margin));
+    const face = ninja ? ninja.face : 1;
+    const ahead = ninja ? ninja.x + face * rand(220, 640) : 500;
+    const x = opts.x != null ? opts.x : clamp(ahead, 80, (flag?flag.x:levelW) - 200);
     const z = { id:nextZid++, x, y:groundY, face: x < (ninja?ninja.x:W/2) ? 1 : -1, kind:rint(0,5), emerge: opts.emerged?1:0, state: opts.emerged?"walk":"emerge", walk:rand(0,10), speed:rand(28,46), wobble:rand(0,TAU), hurt:0, scale:rand(0.88,1.12) };
     zombies.push(z);
     if (!opts.emerged && !opts.silent){ burst(z.x, groundY, "dirt", 14); Sfx.emerge(); }
@@ -233,6 +240,18 @@
       if (z.state==="hit") continue;
       if (onlyReady && z.emerge < 0.6) continue;
       const d=Math.abs(z.x-fromX);
+      if (d<bd){ bd=d; best=z; }
+    }
+    return best;
+  }
+  function zombieInFront(){
+    if (!ninja) return null;
+    let best=null, bd=1e9;
+    for (const z of zombies){
+      if (z.state==="hit" || z.emerge<0.6) continue;
+      const dx=z.x-ninja.x;
+      if (dx*ninja.face < -20) continue;
+      const d=Math.abs(dx);
       if (d<bd){ bd=d; best=z; }
     }
     return best;
@@ -606,7 +625,7 @@
     gg.addColorStop(0,lv.groundTop); gg.addColorStop(0.18,lv.ground); gg.addColorStop(1,lv.ground);
     c.fillStyle=gg;
     c.beginPath(); c.moveTo(0,H); c.lineTo(0,gy);
-    for(let x=0;x<=W;x+=16) c.lineTo(x, gy+Math.sin(x*0.03+t*0.6)*3+Math.sin(x*0.01)*2);
+    for(let x=0;x<=W;x+=16) c.lineTo(x, gy+Math.sin((x+camX)*0.03+t*0.6)*3+Math.sin((x+camX)*0.01)*2);
     c.lineTo(W,H); c.closePath(); c.fill();
 
     c.fillStyle="rgba(0,0,0,0.06)";
@@ -824,33 +843,104 @@
     c.restore();
   }
 
+  function buildLevel(){
+    const gy = groundY;
+    const v = levelIndex % 3;
+    levelW = 3200;
+    platforms = [];
+    function P(x,rise,w,kind){ platforms.push({x,y:gy-rise,w,h:28,kind:kind||"ledge"}); }
+    if (v===0){ P(760,110,260); P(1180,190,220); P(1620,110,240); P(2040,150,200); }
+    else if (v===1){ P(700,100,280); P(1140,100,200); P(1480,180,240); P(1960,120,220); }
+    else { P(820,120,300); P(1300,190,240); P(1760,120,220); }
+    const tx = 2420;
+    P(tx, 100, 320, "tower");
+    P(tx+110, 195, 300, "tower");
+    P(tx+210, 290, 280, "tower");
+    tower = { x:tx, w:500, top:gy-290 };
+    const top = platforms[platforms.length-1];
+    flag = { x: top.x + top.w*0.65, y: top.y };
+  }
+  function drawTowerAndPlatforms(c){
+    const lv=currentLevel();
+    if (tower){
+      const x=tower.x+40, w=tower.w-80, top=tower.top, h=Math.max(20, groundY-top);
+      c.fillStyle="rgba(0,0,0,0.18)";
+      roundRect(c,x+8,top+8,w,h,10); c.fill();
+      c.fillStyle=lv.dirt||"#6b3f1f";
+      roundRect(c,x,top,w,h,10); c.fill();
+      c.fillStyle="rgba(255,255,255,0.12)";
+      c.fillRect(x+12,top+16,10,Math.max(8,h-24));
+      c.fillStyle="rgba(0,0,0,0.28)";
+      roundRect(c,x+w*0.5-18,groundY-70,36,70,8); c.fill();
+      c.fillStyle="#ffe08a";
+      for (let i=0;i<2;i++){
+        roundRect(c,x+24,top+40+i*70,22,24,4); c.fill();
+        roundRect(c,x+w-46,top+40+i*70,22,24,4); c.fill();
+      }
+    }
+    for (const p of platforms){
+      c.fillStyle="rgba(0,0,0,0.22)";
+      ellipse(c,p.x+p.w/2,p.y+p.h+4,p.w*0.48,7); c.fill();
+      c.fillStyle=lv.dirt;
+      roundRect(c,p.x,p.y,p.w,p.h,8); c.fill();
+      c.fillStyle=lv.groundTop;
+      roundRect(c,p.x-3,p.y-8,p.w+6,16,8); c.fill();
+      c.strokeStyle="rgba(0,0,0,0.2)"; c.lineWidth=2;
+      roundRect(c,p.x,p.y,p.w,p.h,8); c.stroke();
+    }
+    if (flag){
+      const ax=flag.x, ay=flag.y-90+Math.sin(time*4)*8;
+      c.fillStyle="#ffe566";
+      c.beginPath(); c.moveTo(ax,ay-22); c.lineTo(ax+18,ay); c.lineTo(ax+7,ay); c.lineTo(ax+7,ay+22); c.lineTo(ax-7,ay+22); c.lineTo(ax-7,ay); c.lineTo(ax-18,ay); c.closePath(); c.fill();
+      c.strokeStyle="#1a1040"; c.lineWidth=3; c.stroke();
+      text(c,"UP!",ax,ay+40,22,"#ffe566","#1a1040",6);
+      const fx=flag.x, fy=flag.y;
+      c.fillStyle="#c4b8a0"; c.fillRect(fx-3,fy-110,6,110);
+      c.fillStyle="#e6392b";
+      const wav=Math.sin(time*5)*8;
+      c.beginPath(); c.moveTo(fx+3,fy-110); c.lineTo(fx+64+wav,fy-92); c.lineTo(fx+3,fy-70); c.closePath(); c.fill();
+      c.strokeStyle="#9b1d1d"; c.lineWidth=2; c.stroke();
+      drawStarShape(c, fx+26+wav*0.4, fy-92, 8, "#ffe566");
+    }
+    text(c,"GO  →", 280, groundY-130, 28, "#ffe566", "#1a1040", 7);
+  }
+
   function layoutButtons(){
     const short = Math.min(W,H);
     const isPortrait = H>W;
-    const size = clamp(short*(isPortrait?0.22:0.18), 100, 156);
-    const labelSpace = 28;
-    const pad = 16 + (isPortrait?6:0);
+    const size = clamp(short*(isPortrait?0.155:0.15), 88, 132);
+    const labelSpace = 22;
+    const pad = 14;
+    const gap = 8;
     const y = H - pad - labelSpace - size/2;
-    buttons.tri = { x: pad+size/2, y, r: size/2 };
+    buttons.left  = { x: pad+size/2, y, r: size/2 };
+    buttons.right = { x: pad+size+gap+size/2, y, r: size/2 };
+    buttons.jump  = { x: (buttons.left.x+buttons.right.x)/2, y: y-size-6, r: size/2 };
+    buttons.tri = { x: W-pad-size-gap-size/2, y, r: size/2 };
     buttons.x   = { x: W-pad-size/2, y, r: size/2 };
     const playR = clamp(short*0.145, 66, 100);
     buttons.play = { x: W/2, y: Math.min(H*0.78, H - playR - 52), r: playR };
-    groundY = y - size/2 - 16;
-    if (groundY < H*0.5) groundY = H*0.55;
+    groundY = y - size/2 - 14;
+    if (groundY < H*0.48) groundY = H*0.52;
   }
-  function hitBtn(btn,x,y){ return !!(btn && Math.hypot(x-btn.x,y-btn.y) <= btn.r+6); }
+  function hitBtn(btn,x,y){ return !!(btn && Math.hypot(x-btn.x,y-btn.y) <= btn.r+12); }
 
-  function drawButton(c,btn,kind,pressed){
+  function drawRoundBtn(c,btn,pressed,fill,fillPressed,ring){
     if (!btn) return;
     const {x,y,r}=btn;
     const sc = (pressed?0.92:1) * (1+Math.sin(time*3)*0.015);
     c.save(); c.translate(x,y); c.scale(sc,sc);
     c.fillStyle="rgba(0,0,0,0.3)"; ellipse(c,0,8,r,r*0.28); c.fill();
-    const fill = kind==="tri" ? (pressed?"#2f9e44":"#51cf66") : (pressed?"#1c7ed6":"#339af0");
-    const ring = kind==="tri" ? "#2b8a3e" : "#1c6cb8";
-    ellipse(c,0,0,r,r); strokeFill(c,fill,"#fff",7);
+    ellipse(c,0,0,r,r); strokeFill(c, pressed?fillPressed:fill, "#fff", 7);
     c.lineWidth=5; c.strokeStyle=ring; ellipse(c,0,0,r-9,r-9); c.stroke();
     c.fillStyle="rgba(255,255,255,0.28)"; ellipse(c,-r*0.15,-r*0.28,r*0.55,r*0.32); c.fill();
+    c.restore();
+  }
+  function drawButton(c,btn,kind,pressed){
+    if (!btn) return;
+    const {x,y,r}=btn;
+    drawRoundBtn(c,btn,pressed, kind==="tri"?"#51cf66":"#339af0", kind==="tri"?"#2f9e44":"#1c7ed6", kind==="tri"?"#2b8a3e":"#1c6cb8");
+    c.save(); c.translate(x,y); c.scale((pressed?0.92:1), (pressed?0.92:1));
     if (kind==="tri"){
       c.fillStyle="#fff"; c.strokeStyle="#1b5e2a"; c.lineWidth=4;
       c.beginPath(); c.moveTo(0,-r*0.42); c.lineTo(r*0.4,r*0.3); c.lineTo(-r*0.4,r*0.3); c.closePath(); c.fill(); c.stroke();
@@ -861,6 +951,32 @@
     }
     c.restore();
     text(c, kind==="tri"?"HIT":"STAR", x, y+r+16, Math.max(14,r*0.22), "#fff", "#1a1040", 5);
+  }
+  function drawArrowBtn(c,btn,dir,pressed){
+    if (!btn) return;
+    const {x,y,r}=btn;
+    drawRoundBtn(c,btn,pressed,"#ff922b","#f76707","#d9480f");
+    c.save(); c.translate(x,y); c.scale((pressed?0.92:1), (pressed?0.92:1));
+    c.fillStyle="#fff"; c.strokeStyle="#9c2b00"; c.lineWidth=4;
+    c.beginPath();
+    if (dir<0){ c.moveTo(-r*0.42,0); c.lineTo(r*0.32,-r*0.38); c.lineTo(r*0.32,r*0.38); }
+    else { c.moveTo(r*0.42,0); c.lineTo(-r*0.32,-r*0.38); c.lineTo(-r*0.32,r*0.38); }
+    c.closePath(); c.fill(); c.stroke();
+    c.restore();
+    text(c, dir<0?"LEFT":"RIGHT", x, y+r+16, Math.max(13,r*0.2), "#fff", "#1a1040", 5);
+  }
+  function drawJumpBtn(c,btn,pressed){
+    if (!btn) return;
+    const {x,y,r}=btn;
+    drawRoundBtn(c,btn,pressed,"#ffe066","#f59f00","#e67700");
+    c.save(); c.translate(x,y); c.scale((pressed?0.92:1), (pressed?0.92:1));
+    c.fillStyle="#1a1040"; c.strokeStyle="#fff"; c.lineWidth=3;
+    c.beginPath();
+    c.moveTo(0,-r*0.42); c.lineTo(r*0.36,r*0.05); c.lineTo(r*0.14,r*0.05); c.lineTo(r*0.14,r*0.38);
+    c.lineTo(-r*0.14,r*0.38); c.lineTo(-r*0.14,r*0.05); c.lineTo(-r*0.36,r*0.05);
+    c.closePath(); c.fill(); c.stroke();
+    c.restore();
+    text(c, "JUMP", x, y+r+16, Math.max(13,r*0.2), "#fff", "#1a1040", 5);
   }
 
   function drawHUD(c){
@@ -955,25 +1071,31 @@
     c.beginPath(); c.moveTo(-b.r*0.18,-b.r*0.38); c.lineTo(b.r*0.42,0); c.lineTo(-b.r*0.18,b.r*0.38); c.closePath(); c.fill(); c.stroke();
     c.restore();
     text(c,"PLAY!",b.x,b.y+b.r+26,30,"#fff","#1a1040",7);
-    text(c,"Press  ▲  to hit    •    Press  ✕  to throw a star", W/2, H-28, 16, "rgba(255,255,255,0.9)", "#1a1040", 5);
+    text(c,"◀ ▶ run    ▲ jump    △ hit    ✕ star", W/2, H-28, 16, "rgba(255,255,255,0.9)", "#1a1040", 5);
   }
 
   function startGame(){
     state="play"; stars=0; levelIndex=0; levelTime=0; levelKills=0; combo=0;
     zombies=[]; shurikens=[]; particles=[]; floaters=[];
     banner=null; cheer=null; spawnTimer=0.6; camX=0;
-    layoutButtons();
-    ninja=makeNinja(); ninja.x=W*0.5; ninja.y=groundY;
+    jumpBuf=0; coyote=0; jumpPrev=false; levelLock=0;
+    held.left=held.right=held.jump=held.tri=held.x=false;
+    pointers.clear();
+    layoutButtons(); buildLevel();
+    ninja=makeNinja(); ninja.x=200; ninja.y=groundY;
     showBanner("Level 1!", currentLevel().name);
     Sfx.fanfare();
   }
   function showBanner(textStr,sub){ banner={text:textStr, sub:sub||"", t:0, dur:1.8}; }
   function nextLevel(){
+    if (levelLock>0) return;
+    levelLock=1.1;
     for (const z of zombies){ if (z.state!=="hit") burst(z.x,z.y-50,"confetti",16); }
     zombies=[]; shurikens=[];
     levelIndex++; levelTime=0; levelKills=0; spawnTimer=0.8;
-    layoutButtons();
-    if (ninja){ ninja.y=groundY; ninja.x=clamp(ninja.x,80,W-80); }
+    layoutButtons(); buildLevel();
+    if (ninja){ ninja.x=200; ninja.y=groundY; ninja.vy=0; ninja.onGround=true; ninja.state="idle"; }
+    camX=0;
     showBanner("Level "+(levelIndex+1)+"!", currentLevel().name);
     Sfx.fanfare(); confettiRain(36);
   }
@@ -981,9 +1103,10 @@
     opts=opts||{};
     levelIndex=((i%LEVELS.length)+LEVELS.length)%LEVELS.length;
     levelTime=0; levelKills=0; spawnTimer=0.5;
-    layoutButtons();
+    layoutButtons(); buildLevel();
     if (!ninja) ninja=makeNinja();
-    ninja.x=W*0.5; ninja.y=groundY;
+    ninja.x=200; ninja.y=groundY; ninja.vy=0; ninja.onGround=true;
+    camX=0;
     if (!opts.noBanner) showBanner("Level "+(levelIndex+1)+"!", currentLevel().name);
     else banner=null;
   }
@@ -992,43 +1115,68 @@
     ninja.t+=dt; ninja.anim+=dt; ninja.scarf+=dt;
     if (ninja.inv>0) ninja.inv-=dt;
     ninja.blink-=dt; if (ninja.blink<-2.8) ninja.blink=0.16;
-    const z=nearestZombie(ninja.x,true);
-    if (z && ninja.state!=="slash" && ninja.state!=="throw" && ninja.state!=="bonk"){
-      ninja.face = z.x>=ninja.x ? 1 : -1;
-    }
-    const melee=Math.max(100, Math.min(W,H)*0.15);
     if (ninja.state==="bonk"){ if (ninja.anim>0.45) ninja.state="idle"; }
-    else if (ninja.state==="slash"){ if (ninja.anim>0.28) ninja.state="idle"; }
-    else if (ninja.state==="throw"){ if (ninja.anim>0.32) ninja.state="idle"; }
-    else if (z){
-      const dx=z.x-ninja.x;
-      if (Math.abs(dx)>melee){ ninja.state="walk"; ninja.x+=Math.sign(dx)*140*dt; ninja.walk+=dt; }
-      else ninja.state="idle";
-    } else {
-      const mid=W*0.5;
-      if (Math.abs(ninja.x-mid)>30){ ninja.x+=Math.sign(mid-ninja.x)*50*dt; ninja.state="walk"; ninja.walk+=dt; }
-      else ninja.state="idle";
+    else if (ninja.state==="slash"){ if (ninja.anim>0.28) ninja.state=ninja.onGround?"idle":"jump"; }
+    else if (ninja.state==="throw"){ if (ninja.anim>0.32) ninja.state=ninja.onGround?"idle":"jump"; }
+
+    let dir=0;
+    if (held.left) dir-=1;
+    if (held.right) dir+=1;
+    if (dir && ninja.state!=="bonk"){
+      ninja.x += dir*WALK_SP*dt;
+      ninja.face = dir;
+      if (ninja.onGround && ninja.state!=="slash" && ninja.state!=="throw"){ ninja.state="walk"; ninja.walk+=dt; }
+    } else if (ninja.onGround && ninja.state!=="slash" && ninja.state!=="throw" && ninja.state!=="bonk"){
+      ninja.state="idle";
     }
-    ninja.x=clamp(ninja.x,70,W-70);
-    ninja.y=groundY;
+
+    if (held.jump && !jumpPrev) jumpBuf=0.14;
+    jumpPrev=!!held.jump;
+    if (jumpBuf>0) jumpBuf-=dt;
+    if (ninja.onGround) coyote=0.12; else coyote-=dt;
+    if (jumpBuf>0 && coyote>0 && ninja.state!=="bonk"){
+      ninja.vy=JUMP_V; ninja.onGround=false; coyote=0; jumpBuf=0;
+      ninja.state="jump"; Sfx.jump();
+    }
+
+    ninja.prevY=ninja.y;
+    if (!ninja.onGround || ninja.vy!==0 || ninja.y<groundY-1){
+      ninja.vy += GRAVITY*dt;
+      ninja.y += ninja.vy*dt;
+    }
+    ninja.onGround=false;
+    if (ninja.y>=groundY){ ninja.y=groundY; ninja.vy=0; ninja.onGround=true; }
+    if (ninja.vy>=0){
+      for (const p of platforms){
+        if (ninja.x>p.x+10 && ninja.x<p.x+p.w-10){
+          if (ninja.prevY<=p.y+10 && ninja.y>=p.y){ ninja.y=p.y; ninja.vy=0; ninja.onGround=true; }
+        }
+      }
+    }
+    ninja.x=clamp(ninja.x, 70, levelW-70);
+
     if (held.tri){ btnRepeat.tri-=dt; if (btnRepeat.tri<=0 && ninja.state!=="slash" && ninja.state!=="bonk"){ slashAttack(); btnRepeat.tri=0.32; } }
-    if (held.x){ btnRepeat.x-=dt; if (btnRepeat.x<=0 && ninja.state!=="throw" && ninja.state!=="bonk"){ throwStar(nearestZombie(ninja.x,true)); btnRepeat.x=0.36; } }
+    if (held.x){ btnRepeat.x-=dt; if (btnRepeat.x<=0 && ninja.state!=="throw" && ninja.state!=="bonk"){ throwStar(zombieInFront()); btnRepeat.x=0.36; } }
+
+    if (levelLock>0) levelLock-=dt;
+    else if (flag && Math.abs(ninja.x-flag.x)<70 && ninja.y<=flag.y+36) nextLevel();
   }
   function updateZombies(dt){
     for (const z of zombies){
       z.wobble+=dt;
+      z.y=groundY;
       if (z.state==="emerge"){ z.emerge=Math.min(1,z.emerge+dt/0.7); if (z.emerge>=1) z.state="walk"; continue; }
       if (z.state==="hit") continue;
       z.walk+=dt;
       if (ninja){
         const dir=Math.sign(ninja.x-z.x)||1;
         z.face=dir; z.x+=dir*z.speed*dt;
-        if (Math.abs(z.x-ninja.x)<44 && z.emerge>=1 && ninja.inv<=0) bonkNinja(z);
+        if (Math.abs(z.x-ninja.x)<44 && Math.abs((z.y)-ninja.y)<50 && z.emerge>=1 && ninja.inv<=0) bonkNinja(z);
       }
     }
     zombies = zombies.filter((z)=>{
       if (z.state==="hit"){ z.hurt=(z.hurt||0)+dt; return z.hurt<0.05; }
-      return z.x>-80 && z.x<W+80;
+      return z.x>camX-180 && z.x<levelW+80;
     });
   }
   function updateStars(dt){
@@ -1049,7 +1197,7 @@
         if (Math.hypot(s.x-z.x, s.y-(z.y-55))<42){ poofZombie(z); s.life=0; Sfx.ding(); break; }
       }
     }
-    shurikens = shurikens.filter((s)=>s.life>0 && s.x>-40 && s.x<W+40 && s.y>-40 && s.y<H+40);
+    shurikens = shurikens.filter((s)=>s.life>0 && s.x>camX-60 && s.x<camX+W+60 && s.y>-40 && s.y<H+40);
   }
   function updateParticles(dt){
     for (const p of particles){ p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=p.g*dt; p.rot+=p.rotv*dt; p.life-=p.decay*dt; }
@@ -1063,22 +1211,26 @@
   function updatePlay(dt){
     levelTime+=dt; spawnTimer-=dt;
     const maxZ=3+(levelIndex>5?1:0);
-    if (spawnTimer<=0 && zombies.filter((z)=>z.state!=="hit").length<maxZ){ spawnZombie(); spawnTimer=rand(1.5,2.6); }
+    if (spawnTimer<=0 && zombies.filter((z)=>z.state!=="hit").length<maxZ){ spawnZombie(); spawnTimer=rand(1.6,2.6); }
     updateNinja(dt); updateZombies(dt); updateStars(dt); updateParticles(dt); updateFloaters(dt);
-    camX+=18*dt;
+    if (ninja){
+      const target=clamp(ninja.x-W*0.38, 0, Math.max(0, levelW-W));
+      camX += (target-camX)*Math.min(1, 8*dt);
+    }
     if (banner){ banner.t+=dt; if (banner.t>=banner.dur) banner=null; }
     if (cheer){ cheer.t+=dt; if (cheer.t>=cheer.dur) cheer=null; }
-    if (levelKills>=9 || levelTime>=52) nextLevel();
   }
 
-  function drawParticles(c){
+  function drawParticles(c, space){
     for (const p of particles){
+      if ((p.space||"world")!==space) continue;
       c.save(); c.globalAlpha=clamp(p.life,0,1); c.translate(p.x,p.y); c.rotate(p.rot); c.fillStyle=p.color;
       if (p.shape==="star") drawStarShape(c,0,0,p.size,p.color);
       else if (p.shape==="rect") c.fillRect(-p.size,-p.size*0.5,p.size*2,p.size);
       else { ellipse(c,0,0,p.size,p.size*0.75); c.fill(); }
       c.restore();
     }
+    if (space!=="world") return;
     for (const f of floaters){
       c.save(); c.globalAlpha=clamp(1-f.t/0.9,0,1);
       text(c,f.str,f.x,f.y,26,f.color,"#1a1040",6);
@@ -1086,54 +1238,103 @@
     }
   }
   function drawFrame(){
+    const gyWas=groundY;
     layoutButtons();
+    if (state==="play" && Math.abs(gyWas-groundY)>1) buildLevel();
     if (state==="title"){ drawTitle(ctx); return; }
-    if (ninja) ninja.y=groundY;
     drawBackground(ctx, currentLevel(), time);
+    ctx.save();
+    ctx.translate(-camX, 0);
+    drawTowerAndPlatforms(ctx);
     for (const z of zombies) drawZombie(ctx,z);
     if (ninja){
       if (ninja.inv>0 && Math.floor(time*16)%2===0) ctx.globalAlpha=0.65;
       drawNinja(ctx,ninja); ctx.globalAlpha=1;
     }
     for (const s of shurikens) drawShuriken(ctx,s);
-    drawParticles(ctx);
+    drawParticles(ctx,"world");
+    ctx.restore();
+    drawParticles(ctx,"screen");
     drawHUD(ctx);
     drawCheer(ctx);
     drawBanner(ctx);
+    drawArrowBtn(ctx, buttons.left, -1, held.left);
+    drawArrowBtn(ctx, buttons.right, 1, held.right);
+    drawJumpBtn(ctx, buttons.jump, held.jump);
     drawButton(ctx, buttons.tri, "tri", held.tri);
     drawButton(ctx, buttons.x, "x", held.x);
   }
 
-  function cssPos(e){
-    const r=canvas.getBoundingClientRect();
-    const t=(e.changedTouches&&e.changedTouches[0])||(e.touches&&e.touches[0])||e;
-    return { x:t.clientX-r.left, y:t.clientY-r.top };
-  }
-  function zombieAt(x,y){
+  function posFrom(t,r){ return { x:t.clientX-r.left, y:t.clientY-r.top }; }
+  function pointerId(t){ return t.identifier!=null ? "t"+t.identifier : "mouse"; }
+  function zombieAt(worldX,y){
     for (let i=zombies.length-1;i>=0;i--){
       const z=zombies[i]; if (z.state==="hit") continue;
-      if (Math.hypot(x-z.x, y-(z.y-55))<56) return z;
+      if (Math.hypot(worldX-z.x, y-(z.y-55))<56) return z;
     }
     return null;
+  }
+  function unbindPointer(id){
+    const prev=pointers.get(id);
+    pointers.delete(id);
+    if (!prev) return;
+    let still=false;
+    for (const v of pointers.values()) if (v===prev) still=true;
+    if (!still) held[prev]=false;
+  }
+  function bindPointer(id,x,y,isDown){
+    if (state==="title"){
+      if (isDown && (hitBtn(buttons.play,x,y) || y>H*0.4)){ playPressed=true; Sfx.button(); }
+      return;
+    }
+    unbindPointer(id);
+    const hit = hitBtn(buttons.left,x,y)?"left"
+      : hitBtn(buttons.right,x,y)?"right"
+      : hitBtn(buttons.jump,x,y)?"jump"
+      : hitBtn(buttons.tri,x,y)?"tri"
+      : hitBtn(buttons.x,x,y)?"x"
+      : null;
+    if (hit){
+      const was=held[hit];
+      pointers.set(id, hit);
+      held[hit]=true;
+      if (hit==="tri" && isDown && !was){ btnRepeat.tri=0.32; slashAttack(); }
+      if (hit==="x" && isDown && !was){ btnRepeat.x=0.36; throwStar(zombieInFront()); }
+      if (hit==="jump" && isDown) jumpBuf=0.14;
+      return;
+    }
+    if (isDown){
+      const z=zombieAt(x+camX,y);
+      if (z) throwStar(z);
+    }
+  }
+  function eachChanged(e, fn){
+    const r=canvas.getBoundingClientRect();
+    const list=e.changedTouches||[e];
+    for (const t of list){
+      if (t.clientX==null) continue;
+      fn(pointerId(t), posFrom(t,r));
+    }
   }
   function onDown(e){
     if (e && e.preventDefault) e.preventDefault();
     Sfx.unlock();
-    const p=cssPos(e);
-    if (state==="title"){
-      if (hitBtn(buttons.play,p.x,p.y) || p.y>H*0.4){ playPressed=true; Sfx.button(); }
-      return;
-    }
-    if (hitBtn(buttons.tri,p.x,p.y)){ held.tri=true; btnRepeat.tri=0.32; slashAttack(); return; }
-    if (hitBtn(buttons.x,p.x,p.y)){ held.x=true; btnRepeat.x=0.36; throwStar(nearestZombie(ninja.x,true)); return; }
-    const z=zombieAt(p.x,p.y); if (z) throwStar(z);
+    eachChanged(e, (id,p)=>bindPointer(id,p.x,p.y,true));
   }
   function onUp(e){
     if (e && e.preventDefault) e.preventDefault();
     if (state==="title" && playPressed){ playPressed=false; startGame(); return; }
-    held.tri=false; held.x=false;
+    eachChanged(e, (id)=>unbindPointer(id));
+    if (!e.changedTouches && !e.touches){ unbindPointer("mouse"); }
   }
-  function onMove(e){ if (e && e.preventDefault) e.preventDefault(); }
+  function onMove(e){
+    if (e && e.preventDefault) e.preventDefault();
+    if (state!=="play") return;
+    eachChanged(e, (id,p)=>{
+      const kind=pointers.get(id);
+      if (kind==="left"||kind==="right") bindPointer(id,p.x,p.y,false);
+    });
+  }
 
   const evOpts={passive:false};
   canvas.addEventListener("touchstart",onDown,evOpts);
@@ -1142,22 +1343,35 @@
   canvas.addEventListener("touchmove",onMove,evOpts);
   canvas.addEventListener("mousedown",onDown,evOpts);
   window.addEventListener("mouseup",onUp,evOpts);
+  canvas.addEventListener("mousemove",(e)=>{ if (e.buttons) onMove(e); });
   canvas.addEventListener("contextmenu",(e)=>e.preventDefault());
   ["gesturestart","gesturechange","gestureend"].forEach((ev)=>document.addEventListener(ev,(e)=>e.preventDefault(),evOpts));
   document.addEventListener("dblclick",(e)=>e.preventDefault(),evOpts);
   document.addEventListener("touchmove",(e)=>e.preventDefault(),evOpts);
 
+  const keyMap={
+    ArrowLeft:"left", a:"left", A:"left",
+    ArrowRight:"right", d:"right", D:"right",
+    ArrowUp:"jump", w:"jump", W:"jump", " ":"jump", k:"jump", K:"jump",
+    e:"tri", E:"tri", j:"tri", J:"tri",
+    x:"x", X:"x", f:"x", F:"x"
+  };
   window.addEventListener("keydown",(e)=>{
+    const btn=keyMap[e.key];
+    if (!btn) return;
     if (e.repeat) return;
     Sfx.unlock();
-    if (state==="title" && (e.key==="Enter"||e.key===" "||e.key==="p")){ startGame(); return; }
+    if (state==="title" && (e.key==="Enter"||e.key===" "||e.key==="p"||e.key==="P")){ startGame(); return; }
     if (state!=="play") return;
-    if (e.key===" "||e.key==="ArrowUp"||e.key==="w"||e.key==="e"){ held.tri=true; btnRepeat.tri=0.32; slashAttack(); }
-    if (e.key==="x"||e.key==="f"||e.key==="ArrowDown"||e.key==="s"){ held.x=true; btnRepeat.x=0.36; throwStar(nearestZombie(ninja.x,true)); }
+    e.preventDefault();
+    held[btn]=true;
+    if (btn==="tri"){ btnRepeat.tri=0.32; slashAttack(); }
+    if (btn==="x"){ btnRepeat.x=0.36; throwStar(zombieInFront()); }
+    if (btn==="jump") jumpBuf=0.14;
   });
   window.addEventListener("keyup",(e)=>{
-    if (e.key===" "||e.key==="ArrowUp"||e.key==="w"||e.key==="e") held.tri=false;
-    if (e.key==="x"||e.key==="f"||e.key==="ArrowDown"||e.key==="s") held.x=false;
+    const btn=keyMap[e.key];
+    if (btn) held[btn]=false;
   });
 
   function resize(){
@@ -1171,7 +1385,11 @@
     canvas.style.height=H+"px";
     ctx.setTransform(DPR,0,0,DPR,0,0);
     layoutButtons();
-    if (ninja){ ninja.x=clamp(ninja.x,70,W-70); ninja.y=groundY; }
+    if (state==="play") buildLevel();
+    if (ninja){
+      ninja.x=clamp(ninja.x,70,levelW-70);
+      if (ninja.onGround) ninja.y=Math.min(ninja.y, groundY);
+    }
   }
   window.addEventListener("resize",resize);
   if (window.visualViewport) window.visualViewport.addEventListener("resize",resize);
@@ -1201,14 +1419,10 @@
       goToLevel(lv,{ noBanner: params.get("banner")!=="1" });
       stars=parseInt(params.get("stars")||"12",10);
       zombies=[];
-      spawnZombie({x:W*0.22, emerged:true, silent:true});
-      spawnZombie({x:W*0.78, emerged:true, silent:true});
-      spawnZombie({x:W*0.65, emerged:true, silent:true});
-      if (zombies[2]) zombies[2].emerge=0.55;
-      ninja.x=W*0.45; ninja.face=1; ninja.state="slash"; ninja.anim=0.1;
-      throwStar(zombies[1]||null);
-      burst(W*0.78, groundY-50, "confetti", 20);
-      sparkle(W*0.5, groundY-80, 10);
+      if (ninja){ ninja.x=1100; ninja.face=1; ninja.y=groundY; }
+      camX=Math.max(0, 1100-W*0.38);
+      spawnZombie({x:1300, emerged:true, silent:true});
+      spawnZombie({x:1600, emerged:true, silent:true});
       if (params.get("banner")==="1") showBanner("Level "+(lv+1)+"!", currentLevel().name);
     }
   }
@@ -1216,20 +1430,32 @@
 
   window.__DESTIN__ = {
     ready:true,
-    getState(){ return { state, stars, levelIndex, levelName:currentLevel().name, levelKills, levelTime, zombieCount:zombies.length, ninja: ninja?{x:ninja.x,y:ninja.y,state:ninja.state,face:ninja.face}:null, buttons, W, H, groundY }; },
-    startGame, goToLevel,
+    getState(){ return { state, stars, levelIndex, levelName:currentLevel().name, levelKills, levelTime, zombieCount:zombies.length, ninja: ninja?{x:ninja.x,y:ninja.y,vy:ninja.vy,state:ninja.state,face:ninja.face,onGround:ninja.onGround}:null, buttons, W, H, groundY, camX, levelW, flag, platformCount:platforms.length }; },
+    startGame, goToLevel, nextLevel,
     press(btn){
       Sfx.unlock();
       if (btn==="play"){ startGame(); return; }
       if (btn==="triangle"||btn==="tri") slashAttack();
-      if (btn==="x"||btn==="star") throwStar(nearestZombie(ninja?ninja.x:W/2,true));
+      if (btn==="x"||btn==="star") throwStar(zombieInFront());
+      if (btn==="jump") jumpBuf=0.14;
+      if (btn==="left"||btn==="right"){ held[btn]=true; }
+    },
+    hold(btn, down){
+      Sfx.unlock();
+      if (btn==="triangle") btn="tri";
+      if (btn==="star") btn="x";
+      held[btn]=!!down;
+      if (down && btn==="jump") jumpBuf=0.14;
+      if (down && btn==="tri"){ btnRepeat.tri=0.32; slashAttack(); }
+      if (down && btn==="x"){ btnRepeat.x=0.36; throwStar(zombieInFront()); }
     },
     tap(x,y){
       onDown({ preventDefault(){}, clientX:x, clientY:y, changedTouches:null, touches:null });
       onUp({ preventDefault(){}, clientX:x, clientY:y, changedTouches:null, touches:null });
     },
-    spawnZombie, slashAttack, throwStar, nextLevel,
+    spawnZombie, slashAttack, throwStar,
     setStars(n){ stars=n; },
+    setNinja(x,y){ if (!ninja) ninja=makeNinja(); if (x!=null) ninja.x=x; if (y!=null){ ninja.y=y; ninja.onGround=false; } },
     unlockAudio(){ Sfx.unlock(); }
   };
 })();
